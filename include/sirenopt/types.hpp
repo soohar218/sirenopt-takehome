@@ -46,6 +46,8 @@ struct SensorStatsSnapshot {
     std::uint64_t gaps;
     std::uint64_t duplicates;
     std::uint64_t late;
+    std::uint64_t out_of_order;
+    std::uint64_t recovered;
 };
 
 struct SensorStats {
@@ -55,6 +57,8 @@ struct SensorStats {
     std::atomic<std::uint64_t> gaps{0};
     std::atomic<std::uint64_t> duplicates{0};
     std::atomic<std::uint64_t> late{0};
+    std::atomic<std::uint64_t> out_of_order{0};
+    std::atomic<std::uint64_t> recovered{0};
 
     SensorStatsSnapshot snapshot() const noexcept;
 };

@@ -23,6 +23,8 @@
 namespace {
 
 using namespace sirenopt;
+constexpr auto kSequenceOrder = BOutputMode::SequenceOrder;
+constexpr auto kDefaultTimeout = std::chrono::milliseconds(20);
 
 void check(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
@@ -69,7 +71,7 @@ void test_codec() {
 }
 
 void test_reorder() {
-    BReorderBuffer buffer(3);
+    BReorderBuffer buffer(3, kDefaultTimeout, kSequenceOrder);
     const auto now = std::chrono::steady_clock::now();
     auto result = buffer.ingest({10, 100, 10.0}, now);
     check(sequences(result.ready) == std::vector<std::uint32_t>{10},
@@ -102,7 +104,7 @@ void test_reorder() {
 }
 
 void test_wraparound() {
-    BReorderBuffer buffer(4);
+    BReorderBuffer buffer(4, kDefaultTimeout, kSequenceOrder);
     const auto now = std::chrono::steady_clock::now();
     check(sequences(buffer.ingest({0xfffffffeu, 1, 1.0}, now).ready) ==
               std::vector<std::uint32_t>{0xfffffffeu}, "wrap start");
@@ -113,7 +115,7 @@ void test_wraparound() {
 }
 
 void test_large_gap() {
-    BReorderBuffer buffer(4);
+    BReorderBuffer buffer(4, kDefaultTimeout, kSequenceOrder);
     const auto now = std::chrono::steady_clock::now();
     buffer.ingest({1, 1, 1.0}, now);
     const auto result = buffer.ingest({1000000, 2, 2.0}, now);
@@ -128,7 +130,7 @@ void test_large_gap() {
 
 void test_timeout_before_late_arrival() {
     const HostTime start{};
-    BReorderBuffer buffer(16);
+    BReorderBuffer buffer(16, kDefaultTimeout, kSequenceOrder);
     check(sequences(buffer.ingest({1, 100, 1.5}, start).ready) ==
               std::vector<std::uint32_t>{1}, "timeout baseline");
     check(buffer.ingest({3, 300, 3.5}, start +
@@ -153,7 +155,7 @@ void test_timeout_before_late_arrival() {
 
 void test_reorder_before_timeout() {
     const HostTime start{};
-    BReorderBuffer buffer(16);
+    BReorderBuffer buffer(16, kDefaultTimeout, kSequenceOrder);
     buffer.ingest({1, 100, 1.5}, start);
     buffer.ingest({3, 300, 3.5}, start + std::chrono::milliseconds(1));
     auto result = buffer.ingest({2, 200, 2.5},
@@ -168,7 +170,7 @@ void test_reorder_before_timeout() {
 
 void test_late_arrival_triggers_expiry() {
     const HostTime start{};
-    BReorderBuffer buffer(16);
+    BReorderBuffer buffer(16, kDefaultTimeout, kSequenceOrder);
     buffer.ingest({1, 100, 1.5}, start);
     buffer.ingest({3, 300, 3.5}, start + std::chrono::milliseconds(1));
     auto result = buffer.ingest({2, 200, 2.5},
@@ -181,7 +183,7 @@ void test_late_arrival_triggers_expiry() {
 
 void test_window_before_timeout() {
     const HostTime start{};
-    BReorderBuffer buffer(2);
+    BReorderBuffer buffer(2, kDefaultTimeout, kSequenceOrder);
     buffer.ingest({1, 100, 1.5}, start);
     buffer.ingest({3, 300, 3.5}, start + std::chrono::milliseconds(1));
     auto result = buffer.ingest({4, 400, 4.5},
@@ -194,7 +196,7 @@ void test_window_before_timeout() {
 
 void test_multiple_missing_and_short_timeout() {
     const HostTime start{};
-    BReorderBuffer buffer(16, std::chrono::milliseconds(5));
+    BReorderBuffer buffer(16, std::chrono::milliseconds(5), kSequenceOrder);
     buffer.ingest({1, 100, 1.5}, start);
     buffer.ingest({4, 400, 4.5}, start + std::chrono::milliseconds(1));
     auto result = buffer.expire(start + std::chrono::milliseconds(6));
@@ -203,7 +205,7 @@ void test_multiple_missing_and_short_timeout() {
           "short timeout finalizes consecutive gaps");
     check(buffer.flush().gaps == 0, "no duplicate gaps at shutdown");
 
-    BReorderBuffer staggered(16, std::chrono::milliseconds(5));
+    BReorderBuffer staggered(16, std::chrono::milliseconds(5), kSequenceOrder);
     staggered.ingest({1, 100, 1.5}, start);
     staggered.ingest({3, 300, 3.5}, start + std::chrono::milliseconds(1));
     staggered.ingest({5, 500, 5.5}, start + std::chrono::milliseconds(4));
@@ -216,7 +218,7 @@ void test_multiple_missing_and_short_timeout() {
               sequences(result.ready) == std::vector<std::uint32_t>{5},
           "later hole expires at its own deadline");
 
-    BReorderBuffer shutdown(16, std::chrono::milliseconds(5));
+    BReorderBuffer shutdown(16, std::chrono::milliseconds(5), kSequenceOrder);
     shutdown.ingest({1, 100, 1.5}, start);
     shutdown.ingest({3, 300, 3.5}, start + std::chrono::milliseconds(1));
     result = shutdown.flush();
@@ -225,6 +227,83 @@ void test_multiple_missing_and_short_timeout() {
           "shutdown flushes pending gap once");
     check(shutdown.expire(start + std::chrono::milliseconds(100)).gaps == 0,
           "post-shutdown expiry does not double count");
+}
+
+void test_arrival_order_tracking() {
+    const SensorBConfig defaults;
+    check(defaults.output_mode == BOutputMode::ArrivalOrder &&
+              defaults.reorder_window == 16 &&
+              defaults.reorder_timeout == kDefaultTimeout,
+          "arrival mode and existing tracking defaults");
+
+    const HostTime start{};
+    BReorderBuffer buffer(16);
+    auto result = buffer.ingest({10, 100, 10.5}, start);
+    check(sequences(result.ready) == std::vector<std::uint32_t>{10},
+          "arrival mode emits first packet");
+    result = buffer.ingest({12, 120, 12.5},
+                           start + std::chrono::milliseconds(1));
+    check(sequences(result.ready) == std::vector<std::uint32_t>{12} &&
+              result.out_of_order == 1 && result.gaps == 0,
+          "future packet forwarded immediately");
+    check(result.ready[0].host_timestamp ==
+                  start + std::chrono::milliseconds(1) &&
+              result.ready[0].device_timestamp_ns == 120 &&
+              std::get<NetworkReading>(result.ready[0].reading).value == 12.5,
+          "arrival and device metadata preserved");
+    result = buffer.ingest({11, 110, 11.5},
+                           start + std::chrono::milliseconds(2));
+    check(sequences(result.ready) == std::vector<std::uint32_t>{11} &&
+              result.out_of_order == 1 && result.recovered == 1 &&
+              result.gaps == 0,
+          "missing sequence recovered without delayed output");
+    result = buffer.ingest({11, 110, 11.5},
+                           start + std::chrono::milliseconds(3));
+    check(result.disposition == PacketDisposition::duplicate &&
+              result.ready.empty(), "arrival mode duplicate rejected");
+    result = buffer.ingest({14, 140, 14.5},
+                           start + std::chrono::milliseconds(4));
+    check(sequences(result.ready) == std::vector<std::uint32_t>{14},
+          "later packet forwarded during gap");
+    result = buffer.expire(start + std::chrono::milliseconds(24));
+    check(result.gaps == 1 && result.ready.empty(),
+          "unrecovered gap finalized without duplicate output");
+    result = buffer.ingest({13, 130, 13.5},
+                           start + std::chrono::milliseconds(25));
+    check(result.disposition == PacketDisposition::late &&
+              result.ready.empty(), "finalized gap arrives late");
+    check(buffer.flush().gaps == 0, "arrival mode flush does not recount");
+}
+
+void test_arrival_order_multiple_recoveries_and_window() {
+    const HostTime start{};
+    BReorderBuffer buffer(16);
+    buffer.ingest({1, 1, 1.0}, start);
+    auto result = buffer.ingest({4, 4, 4.0},
+                                start + std::chrono::milliseconds(1));
+    check(sequences(result.ready) == std::vector<std::uint32_t>{4},
+          "arrival mode forwards across multiple holes");
+    result = buffer.ingest({2, 2, 2.0},
+                           start + std::chrono::milliseconds(2));
+    check(result.recovered == 1 &&
+              sequences(result.ready) == std::vector<std::uint32_t>{2},
+          "first missing sequence recovered");
+    result = buffer.ingest({3, 3, 3.0},
+                           start + std::chrono::milliseconds(3));
+    check(result.recovered == 1 &&
+              sequences(result.ready) == std::vector<std::uint32_t>{3} &&
+              buffer.flush().gaps == 0,
+          "second missing sequence recovered");
+
+    BReorderBuffer window(2);
+    window.ingest({1, 1, 1.0}, start);
+    window.ingest({3, 3, 3.0}, start + std::chrono::milliseconds(1));
+    result = window.ingest({4, 4, 4.0},
+                           start + std::chrono::milliseconds(2));
+    check(result.gaps == 1 &&
+              sequences(result.ready) == std::vector<std::uint32_t>{4} &&
+              window.flush().gaps == 0,
+          "window gap does not repeat previously emitted packets");
 }
 
 class CollectSink final : public ISampleSink {
@@ -274,7 +353,7 @@ void send_packet(std::uint16_t port, const BPacket& packet) {
 }
 
 void test_udp(bool inject_faults) {
-    SensorB sensor({0, 4});
+    SensorB sensor({0, 4, kDefaultTimeout, kSequenceOrder});
     SensorStats stats;
     CollectSink sink;
     std::atomic<bool> stop{false};
@@ -374,7 +453,7 @@ void test_udp(bool inject_faults) {
 }
 
 void test_udp_idle_timeout() {
-    SensorB sensor({0, 16, std::chrono::milliseconds(20)});
+    SensorB sensor({0, 16, kDefaultTimeout, kSequenceOrder});
     SensorStats stats;
     CollectSink sink;
     std::atomic<bool> stop{false};
@@ -426,6 +505,68 @@ void test_udp_idle_timeout() {
     }
 }
 
+void test_udp_arrival_order() {
+    SensorB sensor({0, 16, std::chrono::milliseconds(100),
+                    BOutputMode::ArrivalOrder});
+    SensorStats stats;
+    CollectSink sink;
+    std::atomic<bool> stop{false};
+    std::exception_ptr receiver_error;
+    std::thread receiver([&] {
+        try {
+            sensor.run(sink, stop, stats);
+        } catch (...) {
+            receiver_error = std::current_exception();
+        }
+    });
+    try {
+        wait_until([&] { return sensor.bound_port() != 0; },
+                   "arrival receiver did not bind");
+        const auto port = sensor.bound_port();
+        send_packet(port, {10, 100, 10.5});
+        wait_until([&] { return sink.snapshot().size() == 1; },
+                   "sequence 10 was not forwarded");
+        send_packet(port, {12, 120, 12.5});
+        wait_until([&] { return sink.snapshot().size() == 2; },
+                   "sequence 12 was delayed");
+        send_packet(port, {11, 110, 11.5});
+        wait_until([&] { return sink.snapshot().size() == 3; },
+                   "sequence 11 was not forwarded");
+        send_packet(port, {11, 110, 11.5});
+        wait_until([&] { return stats.duplicates.load() == 1; },
+                   "arrival duplicate was not rejected");
+        send_packet(port, {14, 140, 14.5});
+        wait_until([&] { return sink.snapshot().size() == 4; },
+                   "sequence 14 was delayed");
+        wait_until([&] { return stats.gaps.load() == 1; },
+                   "arrival gap did not expire while idle");
+        const auto output = sink.snapshot();
+        check(sequences(output) ==
+                  (std::vector<std::uint32_t>{10, 12, 11, 14}),
+              "UDP output follows host arrival order");
+        check(output[1].host_timestamp < output[2].host_timestamp &&
+                  output[1].device_timestamp_ns == 120 &&
+                  std::get<NetworkReading>(output[2].reading).value == 11.5,
+              "UDP arrival timestamps and metadata retained");
+        const auto counts = stats.snapshot();
+        check(counts.received == 4 && counts.rejected == 1 &&
+                  counts.duplicates == 1 && counts.gaps == 1 &&
+                  counts.recovered == 1 && counts.out_of_order == 3,
+              "arrival tracking counters");
+        std::cout << "UDP arrival mode: output 10,12,11,14; recovered="
+                  << counts.recovered << " gaps=" << counts.gaps
+                  << " duplicates=" << counts.duplicates << '\n';
+        stop.store(true);
+        receiver.join();
+        if (receiver_error) std::rethrow_exception(receiver_error);
+    } catch (...) {
+        stop.store(true);
+        receiver.join();
+        if (receiver_error) std::rethrow_exception(receiver_error);
+        throw;
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -439,9 +580,12 @@ int main() {
         test_late_arrival_triggers_expiry();
         test_window_before_timeout();
         test_multiple_missing_and_short_timeout();
+        test_arrival_order_tracking();
+        test_arrival_order_multiple_recoveries_and_window();
         test_udp(false);
         test_udp(true);
         test_udp_idle_timeout();
+        test_udp_arrival_order();
         std::cout << "Sensor B tests passed\n";
         return 0;
     } catch (const std::exception& error) {

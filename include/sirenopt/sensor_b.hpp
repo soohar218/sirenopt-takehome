@@ -25,18 +25,22 @@ std::optional<BPacket> decode_b_packet(const std::uint8_t* data,
                                        std::size_t size) noexcept;
 
 enum class PacketDisposition { accepted, duplicate, late };
+enum class BOutputMode { ArrivalOrder, SequenceOrder };
 
 struct ReorderResult {
     PacketDisposition disposition{PacketDisposition::accepted};
     SampleBatch ready;
     std::uint64_t gaps{0};
+    std::uint64_t out_of_order{0};
+    std::uint64_t recovered{0};
 };
 
 class BReorderBuffer {
 public:
     explicit BReorderBuffer(
         std::size_t window,
-        std::chrono::milliseconds timeout = std::chrono::milliseconds(20));
+        std::chrono::milliseconds timeout = std::chrono::milliseconds(20),
+        BOutputMode mode = BOutputMode::ArrivalOrder);
 
     ReorderResult ingest(const BPacket& packet, HostTime arrival);
     ReorderResult expire(HostTime now);
@@ -48,6 +52,7 @@ private:
 
     std::size_t window_;
     std::chrono::milliseconds timeout_;
+    BOutputMode mode_;
     std::optional<std::uint32_t> expected_;
     std::map<std::uint32_t, Sample> pending_;
     std::deque<std::uint32_t> recent_order_;
@@ -58,6 +63,7 @@ struct SensorBConfig {
     std::uint16_t port{0};
     std::size_t reorder_window{16};
     std::chrono::milliseconds reorder_timeout{20};
+    BOutputMode output_mode{BOutputMode::ArrivalOrder};
 };
 
 class SensorB final : public ISensor {

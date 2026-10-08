@@ -61,6 +61,8 @@ sockaddr_in loopback_address(std::uint16_t port) {
 void submit_ready(ReorderResult& result, ISampleSink& sink,
                   SensorStats& stats) {
     stats.gaps.fetch_add(result.gaps, std::memory_order_relaxed);
+    stats.out_of_order.fetch_add(result.out_of_order, std::memory_order_relaxed);
+    stats.recovered.fetch_add(result.recovered, std::memory_order_relaxed);
     for (auto& sample : result.ready) {
         SampleBatch batch;
         batch.push_back(std::move(sample));
@@ -99,8 +101,9 @@ std::optional<BPacket> decode_b_packet(const std::uint8_t* data,
 }
 
 BReorderBuffer::BReorderBuffer(std::size_t window,
-                               std::chrono::milliseconds timeout)
-    : window_(window), timeout_(timeout) {
+                               std::chrono::milliseconds timeout,
+                               BOutputMode mode)
+    : window_(window), timeout_(timeout), mode_(mode) {
     if (window == 0 || window > 65536) {
         throw std::invalid_argument("reorder window must be 1..65536");
     }
@@ -122,7 +125,9 @@ void BReorderBuffer::release_contiguous(ReorderResult& result) {
     while (true) {
         auto it = pending_.find(*expected_);
         if (it == pending_.end()) break;
-        result.ready.push_back(std::move(it->second));
+        if (mode_ == BOutputMode::SequenceOrder) {
+            result.ready.push_back(std::move(it->second));
+        }
         remember(*expected_);
         pending_.erase(it);
         ++*expected_;
@@ -165,9 +170,19 @@ ReorderResult BReorderBuffer::ingest(const BPacket& packet,
         }
     }
 
-    pending_.emplace(packet.sequence,
-                     Sample{SensorId::B, arrival, packet.device_timestamp_ns,
-                            NetworkReading{packet.value, packet.sequence}});
+    const bool recovered = std::any_of(
+        pending_.begin(), pending_.end(), [&](const auto& entry) {
+            const auto distance_ahead =
+                static_cast<std::uint32_t>(entry.first - packet.sequence);
+            return distance_ahead != 0 && distance_ahead < 0x80000000u;
+        });
+    result.recovered = recovered ? 1 : 0;
+    result.out_of_order = (recovered || packet.sequence != *expected_) ? 1 : 0;
+
+    Sample sample{SensorId::B, arrival, packet.device_timestamp_ns,
+                  NetworkReading{packet.value, packet.sequence}};
+    if (mode_ == BOutputMode::ArrivalOrder) result.ready.push_back(sample);
+    pending_.emplace(packet.sequence, std::move(sample));
     release_contiguous(result);
     return result;
 }
@@ -246,7 +261,8 @@ void SensorB::run(ISampleSink& sink, const std::atomic<bool>& stop_requested,
     bound_port_.store(ntohs(actual_address.sin_port),
                       std::memory_order_release);
 
-    BReorderBuffer reorder(config_.reorder_window, config_.reorder_timeout);
+    BReorderBuffer reorder(config_.reorder_window, config_.reorder_timeout,
+                           config_.output_mode);
     while (!stop_requested.load(std::memory_order_relaxed)) {
         std::uint8_t bytes[256];
         const auto size = ::recvfrom(socket.get(), bytes, sizeof(bytes), 0,
