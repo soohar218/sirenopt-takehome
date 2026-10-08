@@ -1,5 +1,10 @@
 #include "sirenopt/sensor_b.hpp"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <chrono>
 #include <algorithm>
 #include <cmath>
@@ -121,6 +126,107 @@ void test_large_gap() {
           "large gap flush");
 }
 
+void test_timeout_before_late_arrival() {
+    const HostTime start{};
+    BReorderBuffer buffer(16);
+    check(sequences(buffer.ingest({1, 100, 1.5}, start).ready) ==
+              std::vector<std::uint32_t>{1}, "timeout baseline");
+    check(buffer.ingest({3, 300, 3.5}, start +
+                            std::chrono::milliseconds(1)).ready.empty(),
+          "future packet waits");
+    check(buffer.expire(start + std::chrono::milliseconds(20)).ready.empty(),
+          "timeout has not elapsed");
+    auto result = buffer.expire(start + std::chrono::milliseconds(21));
+    check(result.gaps == 1 &&
+              sequences(result.ready) == std::vector<std::uint32_t>{3},
+          "idle timeout finalizes gap and releases packet");
+    check(result.ready[0].host_timestamp ==
+              start + std::chrono::milliseconds(1),
+          "original arrival timestamp preserved");
+    result = buffer.ingest({2, 200, 2.5},
+                           start + std::chrono::milliseconds(22));
+    check(result.disposition == PacketDisposition::late &&
+              result.gaps == 0 && result.ready.empty(),
+          "packet after finalized gap is late");
+    check(buffer.flush().gaps == 0, "shutdown does not repeat timeout gap");
+}
+
+void test_reorder_before_timeout() {
+    const HostTime start{};
+    BReorderBuffer buffer(16);
+    buffer.ingest({1, 100, 1.5}, start);
+    buffer.ingest({3, 300, 3.5}, start + std::chrono::milliseconds(1));
+    auto result = buffer.ingest({2, 200, 2.5},
+                                start + std::chrono::milliseconds(19));
+    check(result.gaps == 0 &&
+              sequences(result.ready) ==
+                  (std::vector<std::uint32_t>{2, 3}),
+          "packet before timeout reorders without gap");
+    check(buffer.expire(start + std::chrono::milliseconds(100)).gaps == 0,
+          "resolved gap stays resolved");
+}
+
+void test_late_arrival_triggers_expiry() {
+    const HostTime start{};
+    BReorderBuffer buffer(16);
+    buffer.ingest({1, 100, 1.5}, start);
+    buffer.ingest({3, 300, 3.5}, start + std::chrono::milliseconds(1));
+    auto result = buffer.ingest({2, 200, 2.5},
+                                start + std::chrono::milliseconds(22));
+    check(result.disposition == PacketDisposition::late &&
+              result.gaps == 1 &&
+              sequences(result.ready) == std::vector<std::uint32_t>{3},
+          "late arrival itself triggers expiry first");
+}
+
+void test_window_before_timeout() {
+    const HostTime start{};
+    BReorderBuffer buffer(2);
+    buffer.ingest({1, 100, 1.5}, start);
+    buffer.ingest({3, 300, 3.5}, start + std::chrono::milliseconds(1));
+    auto result = buffer.ingest({4, 400, 4.5},
+                                start + std::chrono::milliseconds(2));
+    check(result.gaps == 1 &&
+              sequences(result.ready) ==
+                  (std::vector<std::uint32_t>{3, 4}),
+          "window finalizes gap before timeout");
+}
+
+void test_multiple_missing_and_short_timeout() {
+    const HostTime start{};
+    BReorderBuffer buffer(16, std::chrono::milliseconds(5));
+    buffer.ingest({1, 100, 1.5}, start);
+    buffer.ingest({4, 400, 4.5}, start + std::chrono::milliseconds(1));
+    auto result = buffer.expire(start + std::chrono::milliseconds(6));
+    check(result.gaps == 2 &&
+              sequences(result.ready) == std::vector<std::uint32_t>{4},
+          "short timeout finalizes consecutive gaps");
+    check(buffer.flush().gaps == 0, "no duplicate gaps at shutdown");
+
+    BReorderBuffer staggered(16, std::chrono::milliseconds(5));
+    staggered.ingest({1, 100, 1.5}, start);
+    staggered.ingest({3, 300, 3.5}, start + std::chrono::milliseconds(1));
+    staggered.ingest({5, 500, 5.5}, start + std::chrono::milliseconds(4));
+    result = staggered.expire(start + std::chrono::milliseconds(6));
+    check(result.gaps == 1 &&
+              sequences(result.ready) == std::vector<std::uint32_t>{3},
+          "later hole keeps its own detection time");
+    result = staggered.expire(start + std::chrono::milliseconds(9));
+    check(result.gaps == 1 &&
+              sequences(result.ready) == std::vector<std::uint32_t>{5},
+          "later hole expires at its own deadline");
+
+    BReorderBuffer shutdown(16, std::chrono::milliseconds(5));
+    shutdown.ingest({1, 100, 1.5}, start);
+    shutdown.ingest({3, 300, 3.5}, start + std::chrono::milliseconds(1));
+    result = shutdown.flush();
+    check(result.gaps == 1 &&
+              sequences(result.ready) == std::vector<std::uint32_t>{3},
+          "shutdown flushes pending gap once");
+    check(shutdown.expire(start + std::chrono::milliseconds(100)).gaps == 0,
+          "post-shutdown expiry does not double count");
+}
+
 class CollectSink final : public ISampleSink {
 public:
     bool try_submit(SampleBatch&& batch) noexcept override {
@@ -149,6 +255,22 @@ void wait_until(const std::function<bool()>& condition, const char* message) {
             throw std::runtime_error(message);
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
+}
+
+void send_packet(std::uint16_t port, const BPacket& packet) {
+    const int socket_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    check(socket_fd >= 0, "late packet test socket");
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    const auto bytes = encode_b_packet(packet);
+    const auto sent = ::sendto(socket_fd, bytes.data(), bytes.size(), 0,
+                               reinterpret_cast<const sockaddr*>(&address),
+                               sizeof(address));
+    ::close(socket_fd);
+    check(sent == static_cast<ssize_t>(bytes.size()),
+          "late packet test send");
 }
 
 void test_udp(bool inject_faults) {
@@ -251,6 +373,59 @@ void test_udp(bool inject_faults) {
     }
 }
 
+void test_udp_idle_timeout() {
+    SensorB sensor({0, 16, std::chrono::milliseconds(20)});
+    SensorStats stats;
+    CollectSink sink;
+    std::atomic<bool> stop{false};
+    std::exception_ptr receiver_error;
+    std::thread receiver([&] {
+        try {
+            sensor.run(sink, stop, stats);
+        } catch (...) {
+            receiver_error = std::current_exception();
+        }
+    });
+    try {
+        wait_until([&] { return sensor.bound_port() != 0; },
+                   "idle timeout receiver did not bind");
+        MockBSenderConfig config;
+        config.port = sensor.bound_port();
+        config.packet_limit = 3;
+        config.loss_every = 2;
+        config.reorder_every = 0;
+        config.duplicate_every = 0;
+        config.malformed_every = 0;
+        MockBSender(config).run(stop);
+        wait_until([&] { return sink.snapshot().size() == 2; },
+                   "idle UDP timeout did not release buffered packet");
+        check(!stop.load(), "idle release required receiver to keep running");
+        const auto output = sink.snapshot();
+        check(sequences(output) == (std::vector<std::uint32_t>{0, 2}) &&
+                  stats.gaps.load() == 1,
+              "idle UDP timeout output and gap count");
+        std::cout << "UDP idle timeout: output 0,2; gap 1 finalized "
+                     "without another datagram\n";
+        send_packet(sensor.bound_port(), {1, 1000000, 1.5});
+        wait_until([&] { return stats.late.load() == 1; },
+                   "late UDP packet was not rejected");
+        check(stats.rejected.load() == 1 &&
+                  sink.snapshot().size() == 2,
+              "late UDP packet counters and output");
+        std::cout << "UDP late after timeout: late=1 rejected=1\n";
+        stop.store(true);
+        receiver.join();
+        if (receiver_error) std::rethrow_exception(receiver_error);
+        check(stats.gaps.load() == 1,
+              "idle UDP shutdown did not count gap twice");
+    } catch (...) {
+        stop.store(true);
+        receiver.join();
+        if (receiver_error) std::rethrow_exception(receiver_error);
+        throw;
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -259,8 +434,14 @@ int main() {
         test_reorder();
         test_wraparound();
         test_large_gap();
+        test_timeout_before_late_arrival();
+        test_reorder_before_timeout();
+        test_late_arrival_triggers_expiry();
+        test_window_before_timeout();
+        test_multiple_missing_and_short_timeout();
         test_udp(false);
         test_udp(true);
+        test_udp_idle_timeout();
         std::cout << "Sensor B tests passed\n";
         return 0;
     } catch (const std::exception& error) {

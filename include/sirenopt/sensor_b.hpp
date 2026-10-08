@@ -34,9 +34,12 @@ struct ReorderResult {
 
 class BReorderBuffer {
 public:
-    explicit BReorderBuffer(std::size_t window);
+    explicit BReorderBuffer(
+        std::size_t window,
+        std::chrono::milliseconds timeout = std::chrono::milliseconds(20));
 
     ReorderResult ingest(const BPacket& packet, HostTime arrival);
+    ReorderResult expire(HostTime now);
     ReorderResult flush();
 
 private:
@@ -44,6 +47,7 @@ private:
     void remember(std::uint32_t sequence);
 
     std::size_t window_;
+    std::chrono::milliseconds timeout_;
     std::optional<std::uint32_t> expected_;
     std::map<std::uint32_t, Sample> pending_;
     std::deque<std::uint32_t> recent_order_;
@@ -53,6 +57,7 @@ private:
 struct SensorBConfig {
     std::uint16_t port{0};
     std::size_t reorder_window{16};
+    std::chrono::milliseconds reorder_timeout{20};
 };
 
 class SensorB final : public ISensor {

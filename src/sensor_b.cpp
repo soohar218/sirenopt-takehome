@@ -100,9 +100,14 @@ std::optional<BPacket> decode_b_packet(const std::uint8_t* data,
     return packet;
 }
 
-BReorderBuffer::BReorderBuffer(std::size_t window) : window_(window) {
+BReorderBuffer::BReorderBuffer(std::size_t window,
+                               std::chrono::milliseconds timeout)
+    : window_(window), timeout_(timeout) {
     if (window == 0 || window > 65536) {
         throw std::invalid_argument("reorder window must be 1..65536");
+    }
+    if (timeout_.count() <= 0) {
+        throw std::invalid_argument("reorder timeout must be positive");
     }
 }
 
@@ -128,7 +133,7 @@ void BReorderBuffer::release_contiguous(ReorderResult& result) {
 
 ReorderResult BReorderBuffer::ingest(const BPacket& packet,
                                     HostTime arrival) {
-    ReorderResult result;
+    ReorderResult result = expire(arrival);
     if (!expected_) expected_ = packet.sequence;
 
     const std::uint32_t distance = packet.sequence - *expected_;
@@ -169,6 +174,24 @@ ReorderResult BReorderBuffer::ingest(const BPacket& packet,
     return result;
 }
 
+ReorderResult BReorderBuffer::expire(HostTime now) {
+    ReorderResult result;
+    if (!expected_) return result;
+    release_contiguous(result);
+    while (!pending_.empty()) {
+        const auto first_arrival = std::min_element(
+            pending_.begin(), pending_.end(),
+            [](const auto& left, const auto& right) {
+                return left.second.host_timestamp < right.second.host_timestamp;
+            })->second.host_timestamp;
+        if (now - first_arrival < timeout_) break;
+        ++result.gaps;
+        ++*expected_;
+        release_contiguous(result);
+    }
+    return result;
+}
+
 ReorderResult BReorderBuffer::flush() {
     ReorderResult result;
     while (!pending_.empty()) {
@@ -189,6 +212,9 @@ ReorderResult BReorderBuffer::flush() {
 SensorB::SensorB(SensorBConfig config) : config_(config) {
     if (config_.reorder_window == 0 || config_.reorder_window > 65536) {
         throw std::invalid_argument("reorder window must be 1..65536");
+    }
+    if (config_.reorder_timeout.count() <= 0) {
+        throw std::invalid_argument("reorder timeout must be positive");
     }
 }
 
@@ -212,31 +238,41 @@ void SensorB::run(ISampleSink& sink, const std::atomic<bool>& stop_requested,
                       &address_size) != 0) {
         throw std::runtime_error("Sensor B getsockname failed");
     }
-    const timeval timeout{0, 20000};
-    if (::setsockopt(socket.get(), SOL_SOCKET, SO_RCVTIMEO, &timeout,
-                     sizeof(timeout)) != 0) {
+    const auto poll_ms = std::min<std::int64_t>(
+        config_.reorder_timeout.count(), 5);
+    const timeval receive_timeout{0, static_cast<suseconds_t>(poll_ms * 1000)};
+    if (::setsockopt(socket.get(), SOL_SOCKET, SO_RCVTIMEO,
+                     &receive_timeout, sizeof(receive_timeout)) != 0) {
         throw std::runtime_error("Sensor B receive timeout setup failed");
     }
     bound_port_.store(ntohs(actual_address.sin_port),
                       std::memory_order_release);
 
-    BReorderBuffer reorder(config_.reorder_window);
+    BReorderBuffer reorder(config_.reorder_window, config_.reorder_timeout);
     while (!stop_requested.load(std::memory_order_relaxed)) {
         std::uint8_t bytes[256];
         const auto size = ::recvfrom(socket.get(), bytes, sizeof(bytes), 0,
                                      nullptr, nullptr);
+        const int receive_error = errno;
         const auto arrival = std::chrono::steady_clock::now();
         if (size < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+            if (receive_error == EAGAIN || receive_error == EWOULDBLOCK ||
+                receive_error == EINTR) {
+                auto expired = reorder.expire(arrival);
+                submit_ready(expired, sink, stats);
                 continue;
+            }
             throw std::runtime_error("Sensor B UDP receive failed");
         }
         const auto packet = decode_b_packet(bytes, static_cast<std::size_t>(size));
         if (!packet) {
+            auto expired = reorder.expire(arrival);
+            submit_ready(expired, sink, stats);
             stats.rejected.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
         auto result = reorder.ingest(*packet, arrival);
+        submit_ready(result, sink, stats);
         if (result.disposition != PacketDisposition::accepted) {
             stats.rejected.fetch_add(1, std::memory_order_relaxed);
             if (result.disposition == PacketDisposition::duplicate)
@@ -246,7 +282,6 @@ void SensorB::run(ISampleSink& sink, const std::atomic<bool>& stop_requested,
             continue;
         }
         stats.received.fetch_add(1, std::memory_order_relaxed);
-        submit_ready(result, sink, stats);
     }
     auto remaining = reorder.flush();
     submit_ready(remaining, sink, stats);
