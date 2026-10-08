@@ -64,9 +64,7 @@ void submit_ready(ReorderResult& result, ISampleSink& sink,
     for (auto& sample : result.ready) {
         SampleBatch batch;
         batch.push_back(std::move(sample));
-        if (!sink.try_submit(std::move(batch))) {
-            stats.dropped.fetch_add(1, std::memory_order_relaxed);
-        }
+        sink.try_submit(std::move(batch));
     }
 }
 
@@ -272,6 +270,9 @@ void SensorB::run(ISampleSink& sink, const std::atomic<bool>& stop_requested,
             continue;
         }
         auto result = reorder.ingest(*packet, arrival);
+        if (result.disposition == PacketDisposition::accepted) {
+            stats.received.fetch_add(1, std::memory_order_relaxed);
+        }
         submit_ready(result, sink, stats);
         if (result.disposition != PacketDisposition::accepted) {
             stats.rejected.fetch_add(1, std::memory_order_relaxed);
@@ -279,9 +280,7 @@ void SensorB::run(ISampleSink& sink, const std::atomic<bool>& stop_requested,
                 stats.duplicates.fetch_add(1, std::memory_order_relaxed);
             else
                 stats.late.fetch_add(1, std::memory_order_relaxed);
-            continue;
         }
-        stats.received.fetch_add(1, std::memory_order_relaxed);
     }
     auto remaining = reorder.flush();
     submit_ready(remaining, sink, stats);

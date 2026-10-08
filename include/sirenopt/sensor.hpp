@@ -8,8 +8,8 @@ class ISampleSink {
 public:
     virtual ~ISampleSink() = default;
 
-    // The caller retains ownership of batch if submission fails.
-    // Implementations must return immediately even when full or contended.
+    // The sink counts failed submissions in samples as dropped. Implementations
+    // must not wait for consumer progress, including under lock contention.
     virtual bool try_submit(SampleBatch&& batch) noexcept = 0;
 };
 

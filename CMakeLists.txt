@@ -7,6 +7,8 @@ find_package(Threads REQUIRED)
 add_library(sirenopt_core STATIC
     src/types.cpp
     src/sensor_b.cpp
+    src/batch_queue.cpp
+    src/acquisition.cpp
 )
 
 target_include_directories(sirenopt_core PUBLIC
@@ -30,4 +32,8 @@ if(BUILD_TESTING)
     add_executable(sensor_b_tests tests/sensor_b_tests.cpp)
     target_link_libraries(sensor_b_tests PRIVATE sirenopt_core)
     add_test(NAME sensor_b_tests COMMAND sensor_b_tests)
+
+    add_executable(acquisition_tests tests/acquisition_tests.cpp)
+    target_link_libraries(acquisition_tests PRIVATE sirenopt_core)
+    add_test(NAME acquisition_tests COMMAND acquisition_tests)
 endif()
