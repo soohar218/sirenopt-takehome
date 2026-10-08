@@ -1,1 +1,0 @@
-# sirenopt-takehome
