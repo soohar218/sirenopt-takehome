@@ -22,11 +22,7 @@ cmake --build build
 The application starts the three acquisition threads, Sensor B's localhost
 mock sender, the merge thread, and a counting consumer. Press **Ctrl+C** to
 stop producers, drain queued and buffered samples, and print final statistics.
-The merge holdback defaults to 10 ms; to override it, run, for example:
-
-```sh
-./build/sirenopt --holdback-ms 15
-```
+The default merge holdback is 10 ms (configurable with --holdback-ms, e.g., ./build/sirenopt --holdback-ms 15).
 
 ## Run Tests
 
@@ -146,8 +142,9 @@ unaccounted samples. If the consumer throws, merging stops and `join()`
 propagates the error; the attempted delivery is counted as uncertain and is
 not retried.
 
-See [DESIGN.md](DESIGN.md) for threading, timestamp alignment, sensor failure
-handling, 10x bottlenecks, and the Sensor B implementation rationale.
+See the [PDF design note](<Multi-Sensor Data Acquisition Design Note.pdf>) for
+threading, timestamp alignment, sensor failure handling, 10x bottlenecks, and
+the Sensor B implementation rationale.
 
 ## AI Usage
 
