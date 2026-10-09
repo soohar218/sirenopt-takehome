@@ -66,7 +66,7 @@ the Sensor B implementation rationale.
 
 ## AI Usage
 
-I used OpenAI's ChatGPT and Codex for code generation, debugging, tests,
+I used OpenAI's ChatGPT and Codex for assistance in code generation, debugging, tests,
 architecture discussions, benchmarks, and documentation. I reviewed and
 iteratively refined the results, using tests and measured behavior to evaluate
 polling and holdback trade-offs rather than accepting suggestions without
