@@ -44,7 +44,7 @@ Each sensor runs in its own acquisition thread with a bounded FIFO queue. A dedi
 
 ## Sensor B
 
-**UDP Packet Format:** Each packet is 24 bytes: `SB` magic (2), version (1), reserved field (1), sequence number (4), device timestamp in nanoseconds (8), and IEEE-754 value (8). Multibyte fields use big-endian byte order. Malformed packets and non-finite values are rejected.
+**UDP Packet Format:** Each packet is 24 bytes: `SB` magic header (2), version (1), reserved field (1), sequence number (4), device timestamp in nanoseconds (8), and IEEE-754 value (8). Multibyte fields use big-endian byte order. Malformed packets and non-finite values are rejected.
 
 Two forwarding modes are supported:
 
@@ -57,11 +57,11 @@ Both modes track loss, duplicates, and reordering. The default sequence window i
 
 - **Timestamps:** The host's `steady_clock` is the common reference. Samples are timestamped at host observation, not physical measurement time, because sensor clocks are unsynchronized.
 - **Buffering:** Each sensor queue holds up to 64 batches by default. Submission uses nonblocking `try_lock`; incoming batches are dropped and counted if the queue is full, closed, or contended.
-- **Ordering:** The merge uses a configurable 10 ms holdback. Samples older than the last emitted timestamp are dropped; equal timestamps are allowed. Actual processing lag may exceed 10 ms.
+- **Ordering:** The merge uses a configurable 10 ms holdback. Samples older than the last emitted timestamp are dropped; equal timestamps are allowed.
 - **Performance:** The implementation targets the specified baseline rates; sustained 10× throughput is not guaranteed.
 
 See the [PDF design note](<Multi-Sensor Data Acquisition Design Note.pdf>) for
-threading, timestamp alignment, sensor failure handling, 10x bottlenecks, and
+detailed threading, timestamp alignment, sensor failure handling, 10x bottlenecks, and
 the Sensor B implementation rationale.
 
 ## AI Usage
