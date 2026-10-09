@@ -24,6 +24,7 @@ public:
 
     SensorId id() const noexcept { return sensor_->id(); }
     BoundedBatchQueue& queue() noexcept { return queue_; }
+    SensorStats& stats() noexcept { return stats_; }
     const SensorStats& stats() const noexcept { return stats_; }
 
 private:

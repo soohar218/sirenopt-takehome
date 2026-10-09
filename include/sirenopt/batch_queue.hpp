@@ -22,6 +22,7 @@ public:
 
     std::size_t capacity_batches() const noexcept { return capacity_batches_; }
     std::size_t size_batches() const;
+    bool closed_and_empty() const;
 
 private:
     const std::size_t capacity_batches_;

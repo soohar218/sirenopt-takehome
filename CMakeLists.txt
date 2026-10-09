@@ -9,6 +9,8 @@ add_library(sirenopt_core STATIC
     src/sensor_b.cpp
     src/batch_queue.cpp
     src/acquisition.cpp
+    src/mock_sensors.cpp
+    src/merge.cpp
 )
 
 target_include_directories(sirenopt_core PUBLIC
@@ -17,6 +19,12 @@ target_include_directories(sirenopt_core PUBLIC
 
 target_compile_features(sirenopt_core PUBLIC cxx_std_17)
 target_link_libraries(sirenopt_core PUBLIC Threads::Threads)
+
+add_executable(sirenopt src/main.cpp)
+target_link_libraries(sirenopt PRIVATE sirenopt_core)
+
+add_executable(stability_benchmark tests/stability_benchmark.cpp)
+target_link_libraries(stability_benchmark PRIVATE sirenopt_core)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(sirenopt_core PRIVATE -Wall -Wextra -Wpedantic)
@@ -36,4 +44,12 @@ if(BUILD_TESTING)
     add_executable(acquisition_tests tests/acquisition_tests.cpp)
     target_link_libraries(acquisition_tests PRIVATE sirenopt_core)
     add_test(NAME acquisition_tests COMMAND acquisition_tests)
+
+    add_executable(merge_tests tests/merge_tests.cpp)
+    target_link_libraries(merge_tests PRIVATE sirenopt_core)
+    add_test(NAME merge_tests COMMAND merge_tests)
+
+    add_executable(app_tests tests/app_tests.cpp)
+    add_test(NAME app_tests COMMAND app_tests $<TARGET_FILE:sirenopt>)
+    set_tests_properties(app_tests PROPERTIES TIMEOUT 15)
 endif()

@@ -66,4 +66,9 @@ std::size_t BoundedBatchQueue::size_batches() const {
     return size_;
 }
 
+bool BoundedBatchQueue::closed_and_empty() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return closed_ && size_ == 0;
+}
+
 }  // namespace sirenopt
